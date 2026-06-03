@@ -1,0 +1,252 @@
+version: '3.8'
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 100M
+
+services:
+  # --- Infrastructure ---
+  postgres:
+    image: postgres:16-alpine
+    container_name: mystep-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mystep_db
+      POSTGRES_USER: mystep_user
+      POSTGRES_PASSWORD: mystep_secret_2024
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U mystep_user -d mystep_db" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: mystep-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: [ "redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru" ]
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db-net
+
+  mongodb:
+    image: mongo:6-jammy
+    container_name: mystep-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db-net
+
+  # --- Judge0 Sandbox Infrastructure ---
+  judge0-db:
+    image: postgres:13
+    container_name: judge0-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=${JUDGE0_POSTGRES_PASSWORD:-judge0_secret_2024}
+      - POSTGRES_USER=${JUDGE0_POSTGRES_USER:-judge0}
+      - POSTGRES_DB=${JUDGE0_POSTGRES_DB:-judge0}
+    volumes:
+      - judge0_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U judge0 -d judge0" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - judge0-net
+
+  judge0-redis:
+    image: redis:6.2-alpine
+    container_name: judge0-redis
+    restart: unless-stopped
+    command: >
+      sh -c '
+        if [ -n "$${JUDGE0_REDIS_PASSWORD}" ]; then
+          exec redis-server --save 60 1 --appendonly yes --requirepass "$${JUDGE0_REDIS_PASSWORD}"
+        else
+          exec redis-server --save 60 1 --appendonly yes
+        fi
+      '
+    volumes:
+      - judge0_redis_data:/data
+    environment:
+      - JUDGE0_REDIS_PASSWORD=${JUDGE0_REDIS_PASSWORD:-judge0_redis_secret_2024}
+    healthcheck:
+      test: [ "CMD-SHELL", "redis-cli -a \"$${JUDGE0_REDIS_PASSWORD}\" ping || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - judge0-net
+
+  judge0-server:
+    image: judge0/judge0:1.13.1
+    container_name: judge0-server
+    restart: unless-stopped
+    ports:
+      - "2358:2358"
+    privileged: true
+    depends_on:
+      judge0-db:
+        condition: service_healthy
+      judge0-redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=judge0-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${JUDGE0_REDIS_PASSWORD:-judge0_redis_secret_2024}
+      - POSTGRES_HOST=judge0-db
+      - POSTGRES_DB=${JUDGE0_POSTGRES_DB:-judge0}
+      - POSTGRES_USER=${JUDGE0_POSTGRES_USER:-judge0}
+      - POSTGRES_PASSWORD=${JUDGE0_POSTGRES_PASSWORD:-judge0_secret_2024}
+      - AUTH_TOKEN=${JUDGE0_AUTH_TOKEN:-mystep-dev-judge0-token-2024}
+      - RAILS_ENV=production
+      - SECRET_KEY_BASE=${SECRET_KEY_BASE:-b3d9e2f1a8c7d6e5f4b3a2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0}
+    networks:
+      - judge0-net
+
+  judge0-worker:
+    image: judge0/judge0:1.13.1
+    container_name: judge0-worker
+    restart: unless-stopped
+    command: [ "rails", "resque:work", "QUEUE=*" ]
+    privileged: true
+    user: root
+    depends_on:
+      judge0-db:
+        condition: service_healthy
+      judge0-redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=judge0-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${JUDGE0_REDIS_PASSWORD:-judge0_redis_secret_2024}
+      - POSTGRES_HOST=judge0-db
+      - POSTGRES_DB=${JUDGE0_POSTGRES_DB:-judge0}
+      - POSTGRES_USER=${JUDGE0_POSTGRES_USER:-judge0}
+      - POSTGRES_PASSWORD=${JUDGE0_POSTGRES_PASSWORD:-judge0_secret_2024}
+      - AUTH_TOKEN=${JUDGE0_AUTH_TOKEN:-mystep-dev-judge0-token-2024}
+      - RAILS_ENV=production
+      - SECRET_KEY_BASE=${SECRET_KEY_BASE:-b3d9e2f1a8c7d6e5f4b3a2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0}
+    networks:
+      - judge0-net
+
+  # --- Application Services (PULLING FROM DOCKER HUB) ---
+  migration:
+    image: anasmahmoud007/careerio:migration_v1.0
+    container_name: mystep-migration
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://mystep_user:mystep_secret_2024@postgres:5432/mystep_db
+    command: npm run db:migrate
+    networks:
+      - db-net
+
+  api:
+    image: anasmahmoud007/careerio:api_v1.0
+    container_name: mystep-api
+    restart: unless-stopped
+    ports:
+      - "10000:10000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: 10000
+      DATABASE_URL: postgresql://mystep_user:mystep_secret_2024@postgres:5432/mystep_db
+      REDIS_URL: redis://redis:6379
+      MONGODB_URI: mongodb://mongodb:27017/mystep
+      JUDGE0_API_URL: http://judge0-server:2358
+      UPLOADS_DIR: /app/uploads
+    volumes:
+      - uploads_data:/app/uploads
+    env_file:
+      - ./backend/mystep-api/.env
+    networks:
+      - db-net
+      - judge0-net
+      - frontend-net
+
+  python-worker:
+    image: anasmahmoud007/careerio:worker_v1.0
+    container_name: mystep-python-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://mystep_user:mystep_secret_2024@postgres:5432/mystep_db
+      REDIS_URL: redis://redis:6379
+      UPLOADS_DIR: /app/uploads
+    volumes:
+      - uploads_data:/app/uploads
+    env_file:
+      - ./backend/python-worker/.env
+    networks:
+      - db-net
+
+  frontend:
+    image: anasmahmoud007/careerio:frontend_v1.0
+    container_name: mystep-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:10000/api/v1
+    depends_on:
+      - api
+    networks:
+      - frontend-net
+
+volumes:
+  postgres_data:
+  redis_data:
+  mongodb_data:
+  judge0_postgres_data:
+  judge0_redis_data:
+  uploads_data:
+
+networks:
+  frontend-net:
+    driver: bridge
+  db-net:
+    driver: bridge
+  judge0-net:
+    driver: bridge
