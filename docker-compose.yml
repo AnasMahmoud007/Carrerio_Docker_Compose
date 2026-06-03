@@ -223,7 +223,7 @@ services:
       - db-net
 
   frontend:
-    image: anasmahmoud007/careerio:frontend_v1.0
+    image: anasmahmoud007/careerio:frontend_v1.1
     container_name: mystep-frontend
     restart: unless-stopped
     ports:
