@@ -155,7 +155,7 @@ services:
     networks:
       - judge0-net
 
-  # --- Application Services (PULLING FROM DOCKER HUB) ---
+  # --- Application Services (PULLING FIXED IMAGES FROM DOCKER HUB) ---
   migration:
     image: anasmahmoud007/careerio:migration_v1.0
     container_name: mystep-migration
@@ -191,6 +191,10 @@ services:
       MONGODB_URI: mongodb://mongodb:27017/mystep
       JUDGE0_API_URL: http://judge0-server:2358
       UPLOADS_DIR: /app/uploads
+      # Production Overrides
+      ALLOWED_ORIGINS: https://carrerio.me,https://api.carrerio.me
+      THROTTLE_LIMIT: 100
+      PYTHON_WORKER_URL: http://mystep-python-worker:8000
     volumes:
       - uploads_data:/app/uploads
     env_file:
@@ -223,13 +227,14 @@ services:
       - db-net
 
   frontend:
-    image: anasmahmoud007/careerio:frontend_v1.1
+    image: anasmahmoud007/careerio:frontend_v1.0
     container_name: mystep-frontend
     restart: unless-stopped
     ports:
       - "80:80"
     environment:
-      - VITE_API_BASE_URL=http://localhost:10000/api/v1
+      # FIX: Point to the production API subdomain
+      - VITE_API_BASE_URL=https://api.carrerio.me/api/v1
     depends_on:
       - api
     networks:
